@@ -868,7 +868,7 @@ private enum CLISocketPathResolver {
 }
 
 final class SocketClient {
-    private struct RelayEndpoint {
+    struct RelayEndpoint {
         let host: String
         let port: UInt16
     }
@@ -878,8 +878,8 @@ final class SocketClient {
         let relayToken: Data
     }
 
-    private let path: String
-    private var socketFD: Int32 = -1
+    let path: String
+    var socketFD: Int32 = -1
     private static let defaultResponseTimeoutSeconds: TimeInterval = 15.0
     private static let multilineResponseIdleTimeoutSeconds: TimeInterval = 0.12
     private static let maxSocketTimeoutSeconds: TimeInterval = 9_007_199_254_740_991
@@ -902,7 +902,7 @@ final class SocketClient {
         path
     }
 
-    private var relayEndpoint: RelayEndpoint? {
+    var relayEndpoint: RelayEndpoint? {
         Self.parseRelayEndpoint(path)
     }
 
@@ -1047,13 +1047,11 @@ final class SocketClient {
         if result == 0 {
             return
         }
-
         let connectErrno = errno
         Darwin.close(socketFD)
         socketFD = -1
-        throw CLIError(
-            message: "Failed to connect to socket at \(path) (\(String(cString: strerror(connectErrno))), errno \(connectErrno))"
-        )
+        if let actionableMessage = actionableLocalSocketConnectFailureMessage(errnoCode: connectErrno) { throw CLIError(message: actionableMessage) }
+        throw CLIError(message: "Failed to connect to socket at \(path) (\(String(cString: strerror(connectErrno))), errno \(connectErrno))")
     }
 
     private static func parseRelayEndpoint(_ raw: String) -> RelayEndpoint? {
@@ -1221,14 +1219,15 @@ final class SocketClient {
                     if errorCode == EINTR {
                         continue
                     }
-                    close()
                     if errorCode == EAGAIN || errorCode == EWOULDBLOCK || errorCode == ETIMEDOUT {
-                        throw CLIError(message: timeoutMessage)
+                        close(); throw CLIError(message: timeoutMessage)
                     }
+                    if let recoveredMessage = actionableLocalSocketWriteFailureMessage(errnoCode: errorCode, failureMessage: failureMessage) {
+                        close(); throw CLIError(message: recoveredMessage)
+                    }
+                    close()
                     let reason = String(cString: strerror(errorCode))
-                    throw CLIError(
-                        message: "\(failureMessage) (\(reason), errno \(errorCode))"
-                    )
+                    throw CLIError(message: "\(failureMessage) (\(reason), errno \(errorCode))")
                 }
                 if written == 0 {
                     close()
@@ -1306,7 +1305,7 @@ final class SocketClient {
         return line.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func configureReceiveTimeout(_ timeout: TimeInterval) throws {
+    func configureReceiveTimeout(_ timeout: TimeInterval) throws {
         var interval = Self.socketTimeval(for: timeout)
         let result = withUnsafePointer(to: &interval) { ptr in
             setsockopt(
