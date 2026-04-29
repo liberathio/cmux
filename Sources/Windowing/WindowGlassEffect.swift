@@ -4,6 +4,18 @@ import SwiftUI
 
 /// Applies NSGlassEffectView (macOS 26+) to a window, falling back to NSVisualEffectView
 enum WindowGlassEffect {
+    enum Style: Equatable {
+        case regular
+        case clear
+
+        fileprivate var rawNSGlassEffectViewStyle: Int {
+            switch self {
+            case .regular: return 0
+            case .clear: return 1
+            }
+        }
+    }
+
     private static var glassViewKey: UInt8 = 0
     private static var originalContentViewKey: UInt8 = 0
     private static var tintOverlayKey: UInt8 = 0
@@ -12,13 +24,13 @@ enum WindowGlassEffect {
         NSClassFromString("NSGlassEffectView") != nil
     }
 
-    static func apply(to window: NSWindow, tintColor: NSColor? = nil) {
+    static func apply(to window: NSWindow, tintColor: NSColor? = nil, style: Style? = nil) {
         guard let originalContentView = window.contentView else { return }
 
         // Check if we already applied glass (avoid re-wrapping)
         if let existingGlass = objc_getAssociatedObject(window, &glassViewKey) as? NSView {
-            // Already applied, just update the tint
-            updateTint(on: existingGlass, color: tintColor, window: window)
+            // Already applied, just update the tint/style.
+            updateConfiguration(on: existingGlass, color: tintColor, style: style, window: window)
             return
         }
 
@@ -35,13 +47,7 @@ enum WindowGlassEffect {
             glassView.wantsLayer = true
             glassView.layer?.cornerRadius = 0
 
-            // Apply tint color via private API
-            if let color = tintColor {
-                let selector = NSSelectorFromString("setTintColor:")
-                if glassView.responds(to: selector) {
-                    glassView.perform(selector, with: color)
-                }
-            }
+            updateNativeGlassConfiguration(on: glassView, color: tintColor, style: style)
         } else {
             usingGlassEffectView = false
             // Fallback to NSVisualEffectView
@@ -101,16 +107,12 @@ enum WindowGlassEffect {
     /// Update the tint color on an existing glass effect
     static func updateTint(to window: NSWindow, color: NSColor?) {
         guard let glassView = objc_getAssociatedObject(window, &glassViewKey) as? NSView else { return }
-        updateTint(on: glassView, color: color, window: window)
+        updateConfiguration(on: glassView, color: color, style: nil, window: window)
     }
 
-    private static func updateTint(on glassView: NSView, color: NSColor?, window: NSWindow) {
-        // For NSGlassEffectView, use setTintColor:
+    private static func updateConfiguration(on glassView: NSView, color: NSColor?, style: Style?, window: NSWindow) {
         if glassView.className == "NSGlassEffectView" {
-            let selector = NSSelectorFromString("setTintColor:")
-            if glassView.responds(to: selector) {
-                glassView.perform(selector, with: color)
-            }
+            updateNativeGlassConfiguration(on: glassView, color: color, style: style)
         } else {
             // For NSVisualEffectView fallback, update the tint overlay
             if let color {
@@ -120,6 +122,21 @@ enum WindowGlassEffect {
                 tintOverlay.layer?.backgroundColor = color?.cgColor
             }
         }
+    }
+
+    private static func updateNativeGlassConfiguration(on glassView: NSView, color: NSColor?, style: Style?) {
+        let tintSelector = NSSelectorFromString("setTintColor:")
+        if glassView.responds(to: tintSelector) {
+            glassView.perform(tintSelector, with: color)
+        }
+
+        guard let style else { return }
+        let styleSelector = NSSelectorFromString("setStyle:")
+        guard glassView.responds(to: styleSelector) else { return }
+        typealias StyleSetter = @convention(c) (AnyObject, Selector, Int) -> Void
+        let implementation = glassView.method(for: styleSelector)
+        let setter = unsafeBitCast(implementation, to: StyleSetter.self)
+        setter(glassView, styleSelector, style.rawNSGlassEffectViewStyle)
     }
 
     private static func ensureTintOverlay(on glassView: NSView, window: NSWindow) -> NSView {

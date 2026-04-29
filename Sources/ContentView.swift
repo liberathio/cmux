@@ -3745,7 +3745,11 @@ struct ContentView: View {
 
             if shouldApplyWindowGlass {
                 // Apply liquid glass effect to the window with tint from settings
-                WindowGlassEffect.apply(to: window, tintColor: appearance.windowGlassSettings.tintColor)
+                WindowGlassEffect.apply(
+                    to: window,
+                    tintColor: appearance.windowGlassSettings.tintColor,
+                    style: appearance.windowGlassSettings.style
+                )
             } else {
                 WindowGlassEffect.remove(from: window)
             }
