@@ -76,6 +76,23 @@ final class TerminalControllerSocketSecurityTests: XCTestCase {
         XCTAssertTrue(wrongAuthThenPing[1].hasPrefix("ERROR:"))
     }
 
+    func testStartRebindsStaleSocketPathAndServesPing() throws {
+        let socketPath = makeSocketPath("stale-socket")
+        let tabManager = TabManager()
+
+        try createStaleSocket(at: socketPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath))
+
+        TerminalController.shared.start(
+            tabManager: tabManager,
+            socketPath: socketPath,
+            accessMode: .allowAll
+        )
+
+        let pingResponse = try waitForPingResponse(at: socketPath)
+        XCTAssertEqual(pingResponse, "PONG")
+    }
+
     func testSocketCommandPolicyDistinguishesFocusIntent() throws {
 #if DEBUG
         let nonFocus = TerminalController.debugSocketCommandPolicySnapshot(
@@ -397,6 +414,31 @@ final class TerminalControllerSocketSecurityTests: XCTestCase {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(ETIMEDOUT))
     }
 
+    private func waitForPingResponse(at path: String, timeout: TimeInterval = 5.0) throws -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastError: Error?
+
+        while Date() < deadline {
+            do {
+                let responses = try sendCommands(["ping"], to: path)
+                guard let response = responses.first else {
+                    throw NSError(
+                        domain: NSCocoaErrorDomain,
+                        code: NSFileReadUnknownError,
+                        userInfo: [NSLocalizedDescriptionKey: "Socket responded without a line"]
+                    )
+                }
+                return response
+            } catch {
+                lastError = error
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+        }
+
+        XCTFail("Timed out waiting for ping response at \(path): \(String(describing: lastError))")
+        throw lastError ?? NSError(domain: NSPOSIXErrorDomain, code: Int(ETIMEDOUT))
+    }
+
     private func socketMode(at path: String) throws -> UInt16 {
         var fileInfo = stat()
         guard lstat(path, &fileInfo) == 0 else {
@@ -534,6 +576,41 @@ final class TerminalControllerSocketSecurityTests: XCTestCase {
             throw error
         }
         return fd
+    }
+
+    private nonisolated func createStaleSocket(at socketPath: String) throws {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw posixError("socket(AF_UNIX)")
+        }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+
+        let bytes = Array(socketPath.utf8)
+        let maxPathLen = MemoryLayout.size(ofValue: addr.sun_path)
+        guard bytes.count < maxPathLen else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENAMETOOLONG))
+        }
+
+        withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
+            let cPath = UnsafeMutableRawPointer(pathPtr).assumingMemoryBound(to: CChar.self)
+            cPath.initialize(repeating: 0, count: maxPathLen)
+            for (index, byte) in bytes.enumerated() {
+                cPath[index] = CChar(bitPattern: byte)
+            }
+        }
+
+        let addrLen = socklen_t(MemoryLayout<sa_family_t>.size + bytes.count + 1)
+        let bindResult = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.bind(fd, sockaddrPtr, addrLen)
+            }
+        }
+        guard bindResult == 0 else {
+            throw posixError("bind(\(socketPath))")
+        }
     }
 
     private nonisolated func writeLine(_ command: String, to fd: Int32) throws {
