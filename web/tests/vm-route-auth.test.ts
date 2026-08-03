@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { createVmWorkflowMocks } from "./support/vmWorkflowMocks";
 
 const getUser = mock(async () => null);
 const runVmWorkflow = mock(async () => {
@@ -8,6 +9,7 @@ const createVm = mock(() => ({ workflow: "create" }));
 const listUserVms = mock(() => ({ workflow: "list" }));
 const destroyVm = mock(() => ({ workflow: "destroy" }));
 const execVm = mock(() => ({ workflow: "exec" }));
+const getUserVmStatus = mock(() => ({ workflow: "status" }));
 const openAttachEndpoint = mock(() => ({ workflow: "attach" }));
 const openSshEndpoint = mock(() => ({ workflow: "ssh" }));
 const VM_ENV_KEYS = [
@@ -33,15 +35,18 @@ mock.module("../app/lib/stack", () => ({
   isStackConfigured: () => true,
 }));
 
-mock.module("../services/vms/workflows", () => ({
-  createVm,
-  destroyVm,
-  execVm,
-  listUserVms,
-  openAttachEndpoint,
-  openSshEndpoint,
-  runVmWorkflow,
-}));
+mock.module("../services/vms/workflows", () =>
+  createVmWorkflowMocks({
+    createVm,
+    destroyVm,
+    execVm,
+    getUserVmStatus,
+    listUserVms,
+    openAttachEndpoint,
+    openSshEndpoint,
+    runVmWorkflow,
+  }),
+);
 
 const { GET, POST } = await import("../app/api/vm/route");
 const { DELETE } = await import("../app/api/vm/[id]/route");
@@ -57,6 +62,7 @@ beforeEach(() => {
   createVm.mockClear();
   destroyVm.mockClear();
   execVm.mockClear();
+  getUserVmStatus.mockClear();
   listUserVms.mockClear();
   openAttachEndpoint.mockClear();
   openSshEndpoint.mockClear();

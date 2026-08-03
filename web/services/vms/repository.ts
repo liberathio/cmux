@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -42,6 +42,35 @@ export type VmRepositoryShape = {
     readonly userId: string;
     readonly providerVmId: string;
   }) => Effect.Effect<CloudVmRow | null, VmDatabaseError>;
+  /**
+   * Read-only lookup for status polling. `handle` is either a provider VM id or the
+   * idempotency key the caller sent to `POST /api/vm`: a client whose create request timed
+   * out only knows the latter. Destroyed rows stay visible here so "what happened to my VM"
+   * has an answer; mutating paths keep using `findUserVm`, which excludes them.
+   */
+  readonly findUserVmByHandle: (input: {
+    readonly userId: string;
+    readonly handle: string;
+  }) => Effect.Effect<CloudVmRow | null, VmDatabaseError>;
+  /**
+   * Creates whose serverless function died before the provider answered. Only rows without a
+   * `provider_vm_id` qualify: once that column is set the VM really exists and destroying it is
+   * a different operation. These rows keep counting towards the active VM limit, so leaving
+   * them behind locks the owning team out of creating anything.
+   */
+  readonly listAbandonedProvisioningVms: (input: {
+    readonly olderThan: Date;
+    readonly limit: number;
+  }) => Effect.Effect<CloudVmRow[], VmDatabaseError>;
+  /**
+   * Conditional transition used by the reaper. Returns `false` when the row no longer matches,
+   * which is how a create that finished between the scan and the write survives untouched.
+   */
+  readonly markCreateAbandoned: (input: {
+    readonly id: string;
+    readonly code: string;
+    readonly message: string;
+  }) => Effect.Effect<boolean, VmDatabaseError>;
   readonly markDestroyed: (id: string) => Effect.Effect<void, VmDatabaseError>;
   readonly recordLease: (input: {
     readonly vmId: string;
@@ -239,6 +268,67 @@ export const VmRepositoryLive = Layer.succeed(VmRepository, {
         )
         .limit(1);
       return vm ?? null;
+    }),
+
+  findUserVmByHandle: (input) =>
+    dbEffect("findUserVmByHandle", async () => {
+      const db = cloudDb();
+      const [vm] = await db
+        .select()
+        .from(cloudVms)
+        .where(
+          and(
+            eq(cloudVms.userId, input.userId),
+            or(
+              eq(cloudVms.providerVmId, input.handle),
+              eq(cloudVms.idempotencyKey, input.handle),
+            ),
+          ),
+        )
+        // A provider VM id is unique per provider and an idempotency key is unique per user,
+        // but the same string could in principle be both. Prefer the most recent row.
+        .orderBy(desc(cloudVms.createdAt))
+        .limit(1);
+      return vm ?? null;
+    }),
+
+  listAbandonedProvisioningVms: (input) =>
+    dbEffect("listAbandonedProvisioningVms", async () => {
+      const db = cloudDb();
+      return await db
+        .select()
+        .from(cloudVms)
+        .where(
+          and(
+            eq(cloudVms.status, "provisioning"),
+            isNull(cloudVms.providerVmId),
+            lt(cloudVms.createdAt, input.olderThan),
+          ),
+        )
+        .orderBy(cloudVms.createdAt)
+        .limit(input.limit);
+    }),
+
+  markCreateAbandoned: (input) =>
+    dbEffect("markCreateAbandoned", async () => {
+      const db = cloudDb();
+      const rows = await db
+        .update(cloudVms)
+        .set({
+          status: "failed",
+          failureCode: input.code,
+          failureMessage: input.message,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(cloudVms.id, input.id),
+            eq(cloudVms.status, "provisioning"),
+            isNull(cloudVms.providerVmId),
+          ),
+        )
+        .returning({ id: cloudVms.id });
+      return rows.length > 0;
     }),
 
   markDestroyed: (id) =>

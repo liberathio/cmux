@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import * as Effect from "effect/Effect";
 import postgres, { type Sql } from "postgres";
 import { closeCloudDbForTests } from "../db/client";
 import { loadUserVmDbSummary } from "../services/vms/dbReadModel";
+import { VmNotFoundError } from "../services/vms/errors";
+import { VmRepositoryLive } from "../services/vms/repository";
+import { getUserVmStatus } from "../services/vms/workflows";
 
 const runDbTests = process.env.CMUX_DB_TEST === "1";
 const dbTest = runDbTests ? test : test.skip;
@@ -96,4 +100,72 @@ describe("VM DB read model", () => {
       },
     });
   });
+
+  dbTest("resolves VM status by provider VM id and by idempotency key", async () => {
+    if (!sql) throw new Error("test database not initialized");
+
+    await sql`truncate cloud_vm_usage_events, cloud_vm_leases, cloud_vms restart identity cascade`;
+    await sql`
+      insert into cloud_vms (user_id, provider, provider_vm_id, image_id, image_version, status, idempotency_key)
+      values ('user-status-lookup', 'e2b', 'status-provider-vm-1', 'cmuxd-ws:test', 'e2b-test', 'running', 'status-idem-running')
+    `;
+    // A create that never reached the provider: no provider VM id, so the idempotency key is
+    // the only handle the client still holds.
+    await sql`
+      insert into cloud_vms (user_id, provider, image_id, status, idempotency_key, failure_code, failure_message)
+      values ('user-status-lookup', 'freestyle', 'sc-test', 'failed', 'status-idem-failed', 'create', 'provider unavailable')
+    `;
+
+    const byProviderId = await runStatus("user-status-lookup", "status-provider-vm-1");
+    const byIdempotencyKey = await runStatus("user-status-lookup", "status-idem-running");
+    const failed = await runStatus("user-status-lookup", "status-idem-failed");
+
+    expect(byProviderId).toMatchObject({
+      providerVmId: "status-provider-vm-1",
+      status: "running",
+      provider: "e2b",
+      image: "cmuxd-ws:test",
+      imageVersion: "e2b-test",
+      idempotencyKey: "status-idem-running",
+      failure: null,
+    });
+    expect(byIdempotencyKey).toEqual(byProviderId);
+    expect(failed).toMatchObject({
+      providerVmId: null,
+      status: "failed",
+      failure: { code: "create", message: "provider unavailable" },
+    });
+  });
+
+  dbTest("does not expose another user's VM status", async () => {
+    if (!sql) throw new Error("test database not initialized");
+
+    await sql`truncate cloud_vm_usage_events, cloud_vm_leases, cloud_vms restart identity cascade`;
+    await sql`
+      insert into cloud_vms (user_id, provider, provider_vm_id, image_id, status, idempotency_key)
+      values ('user-status-owner', 'e2b', 'status-private-vm', 'cmuxd-ws:test', 'running', 'status-private-idem')
+    `;
+
+    const byProviderId = await Effect.runPromise(
+      getUserVmStatus({ userId: "user-status-attacker", handle: "status-private-vm" }).pipe(
+        Effect.flip,
+        Effect.provide(VmRepositoryLive),
+      ),
+    );
+    const byIdempotencyKey = await Effect.runPromise(
+      getUserVmStatus({ userId: "user-status-attacker", handle: "status-private-idem" }).pipe(
+        Effect.flip,
+        Effect.provide(VmRepositoryLive),
+      ),
+    );
+
+    expect(byProviderId).toBeInstanceOf(VmNotFoundError);
+    expect(byIdempotencyKey).toBeInstanceOf(VmNotFoundError);
+  });
 });
+
+function runStatus(userId: string, handle: string) {
+  return Effect.runPromise(
+    getUserVmStatus({ userId, handle }).pipe(Effect.provide(VmRepositoryLive)),
+  );
+}

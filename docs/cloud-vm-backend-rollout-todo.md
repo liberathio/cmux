@@ -90,9 +90,13 @@ These are already configured in Vercel for development, preview, and production:
   - `OTEL_SERVICE_NAME`
   - `OTEL_EXPORTER_OTLP_ENDPOINT`
   - `OTEL_EXPORTER_OTLP_HEADERS`
-- [ ] Confirm Vercel function max duration for VM routes. `POST /api/vm` can wait on real provider
+- [x] Confirm Vercel function max duration for VM routes. `POST /api/vm` can wait on real provider
   provisioning, so the route either needs a sufficient `maxDuration` or must become an async
   create-status flow before production.
+  - All provider-waiting VM routes now declare `maxDuration = 60`, and the documented recovery for
+    a create that outlives it is polling `GET /api/vm/<idempotency-key>`.
+  - `exec` no longer advertises a 15 minute `timeoutMs`: it is clamped below the function budget,
+    since the platform kills the request first.
 - [ ] Confirm Stack Auth callback and trusted domains include:
   - `https://cmux.com`
   - the Vercel preview domain pattern used by this project
@@ -305,7 +309,14 @@ after the Vercel REST handshake. Rivet is only a temporary stateful control-plan
 - [ ] Decide whether provider create stays synchronous or becomes async:
   - synchronous is simpler but depends on Vercel function duration
   - async requires a queue or background worker but avoids long HTTP requests
-- [ ] Add `GET /api/vm/:id/status` or equivalent before moving long creates fully async.
+  - Current answer: stays synchronous. `VMClient.create` falls back to polling
+    `GET /api/vm/<idempotency-key>` when the request dies (unreachable backend, 409, 502, 504),
+    so a create that outlives the function is recovered by the client instead of needing a
+    queue. Revisit if provider provisioning routinely exceeds the poll deadline.
+- [x] Add `GET /api/vm/:id/status` or equivalent before moving long creates fully async.
+  - Shipped as `GET /api/vm/:id`, where `:id` is a handle resolved against `provider_vm_id` and
+    then `idempotency_key`, so a client whose create request timed out can still read the
+    outcome. Returns `status`, a nullable `id`, and the recorded `failure`.
 - [x] Replace actor serialization with DB correctness:
   - unique constraints for idempotency
   - row locks or advisory locks around destroy/attach/snapshot
@@ -314,7 +325,9 @@ after the Vercel REST handshake. Rivet is only a temporary stateful control-plan
 - [ ] Add a replacement for actor-owned cleanup:
   - expired lease cleanup
   - orphan provider VM cleanup
-  - stuck provisioning cleanup
+  - [x] stuck provisioning cleanup — hourly `/api/cron/vm-reaper` resolves `provisioning` rows
+    with no `provider_vm_id` older than 15 minutes to `failed`, releasing the active VM slot they
+    were holding. Requires `CRON_SECRET`; the route fails closed without it.
 - [x] No Rivet actor migration is needed for new Cloud VM state. If pre-merge actor state existed,
   treat those VMs as pre-production and clean them up provider-side.
 - [x] Remove Rivet env requirements after the DB-backed routes are live:
@@ -329,9 +342,13 @@ after the Vercel REST handshake. Rivet is only a temporary stateful control-plan
 
 ## Phase 8: CI/CD Guardrails
 
-- [ ] PR checks should run web typecheck and Bun tests.
-- [ ] PR checks should not call paid providers by default.
-- [ ] Provider tests should use a `MockVMProvider` by default.
+- [x] PR checks should run web typecheck and Bun tests. The `web-typecheck` job runs
+  `bun tsc --noEmit` and `bun test`; `web-db-migrations` runs the Postgres-backed suites,
+  now including `tests/vm-workflows.test.ts`.
+- [x] PR checks should not call paid providers by default. No CI job sets `E2B_API_KEY` or
+  `FREESTYLE_API_KEY`, and every workflow test injects a stub provider gateway.
+- [x] Provider tests should use a `MockVMProvider` by default. Tests provide their own
+  `VmProviderGatewayShape` through `Layer.succeed`, so no provider driver is constructed.
 - [ ] Staging smoke tests may call real E2B/Freestyle with tiny quotas.
 - [ ] Vercel preview checks should verify the project root is still `web`.
 - [ ] Add a CI check that required deployed env var names are documented in `web/.env.example` and

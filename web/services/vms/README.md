@@ -25,12 +25,79 @@ db/
 ## HTTP surface
 
 - `/api/vm`, authenticated `GET` list and `POST` create.
-- `/api/vm/:id`, authenticated `DELETE` destroy.
+- `/api/vm/:id`, authenticated `GET` status and `DELETE` destroy.
 - `/api/vm/:id/exec`, authenticated `POST` command execution.
 - `/api/vm/:id/attach-endpoint`, authenticated `POST` PTY/RPC attach lease minting.
 - `/api/vm/:id/ssh-endpoint`, authenticated `POST` legacy Freestyle SSH attach.
 
 There is no raw actor or provider protocol endpoint. The old `/api/rivet/*` gateway has been removed.
+
+`/api/cron/vm-reaper` is not part of that surface. It is scheduled from `vercel.json`, authorized
+with `Bearer $CRON_SECRET`, and returns `503` when `CRON_SECRET` is unset so an unprotected deploy
+cannot expose it. See "Abandoned create reaper" below.
+
+### Create status polling
+
+`GET /api/vm/:id` accepts a handle, not only a provider VM id. The handle is matched against
+`cloud_vms.provider_vm_id` first and against `cloud_vms.idempotency_key` second, because a client
+whose `POST /api/vm` exceeded the serverless function duration never received a provider VM id and
+can only identify its create by the `Idempotency-Key` it sent.
+
+The response reports the durable row, not a provider probe:
+
+```json
+{
+  "id": "provider-vm-1",
+  "status": "provisioning | running | failed | paused | destroyed",
+  "provider": "e2b",
+  "image": "cmuxd-ws:proxy-20260424a",
+  "imageVersion": "e2b-proxy-20260424a",
+  "idempotencyKey": "idem-1",
+  "createdAt": 1777000000000,
+  "failure": { "code": "create", "message": "provider unavailable" }
+}
+```
+
+`id` is `null` until the provider create finishes. `failure` is present only for `status: "failed"`.
+Unlike `GET /api/vm`, destroyed rows are still readable here so a caller can tell "destroyed" apart
+from "never existed" — an unknown handle returns `404`.
+
+The supported create flow is therefore:
+
+1. `POST /api/vm` with an `Idempotency-Key` the client generated and persisted.
+2. On a `200`, use the returned `id`.
+3. On a timeout, a dropped connection, or a `409` (`vm create already in progress`), poll
+   `GET /api/vm/<the same idempotency key>` until `status` leaves `provisioning`.
+4. Retrying `POST` with the same key never creates a second provider VM.
+
+### Function duration budget
+
+Every VM route that waits on a provider declares `maxDuration = 60`, mirrored by
+`VM_ROUTE_MAX_DURATION_SECONDS` in `services/vms/config.ts`. Next.js only accepts a literal in the
+route file, so the constant documents the value rather than providing it.
+
+`POST /api/vm/:id/exec` clamps `timeoutMs` to `MAX_EXEC_TIMEOUT_MS` (5s under the budget). The
+provider itself would accept far longer execs, but this request is killed at `maxDuration`, so a
+longer timeout only converts a real exit code into a `504` while the command keeps running.
+Long-running commands belong on the PTY/attach path, not on `exec`.
+
+### Abandoned create reaper
+
+A create whose function died before the provider answered leaves a `provisioning` row with no
+`provider_vm_id`. `beginCreate` counts `provisioning` towards the active VM limit, so that row
+keeps consuming a slot forever: the user's symptom is "I can no longer create a VM", not a stray
+row. `reapStuckProvisioningVms` resolves those rows to `failed` with `failure_code =
+"create_abandoned"` once they are older than 15 minutes, far above the 60s function budget.
+
+- Only rows without a `provider_vm_id` are eligible, and the update is conditional, so a create
+  that finished late is never overwritten.
+- Each reaped row emits a `vm.create.abandoned` usage event, so the cleanup is auditable and
+  repeated runs stay idempotent.
+- Required env: `CRON_SECRET` in every environment where the cron runs.
+
+The reaper deliberately does **not** call the provider. If the provider finished after the
+function died, the VM still exists provider-side; reconciling those against provider inventory
+costs provider API calls and is tracked separately as orphan cleanup.
 
 ## Authentication model
 

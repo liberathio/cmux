@@ -1,6 +1,7 @@
 import type { Span } from "@opentelemetry/api";
 import { recordSpanError, withApiRouteSpan, type MaybeAttributes } from "../telemetry";
 import { unauthorized, verifyRequest, type AuthedUser } from "./auth";
+import { jsonResponse } from "./jsonResponse";
 
 /** Bearer + refresh token pair the mac app stashes in keychain. */
 export type StackBearer = { accessToken: string; refreshToken: string };
@@ -49,17 +50,7 @@ export async function withAuthedVmApiRoute(
   );
 }
 
-/**
- * `Response.json(...)` misbehaves under Next.js 16's turbopack dev build (the handler's
- * promise settles but turbopack reports "No response is returned from route handler").
- * Use `new Response(JSON.stringify(...), { ... })` explicitly instead.
- */
-export function jsonResponse(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
+export { jsonResponse } from "./jsonResponse";
 
 export function notFoundVm(vmId: string): Response {
   return jsonResponse({ error: `vm not found: ${vmId}` }, 404);
