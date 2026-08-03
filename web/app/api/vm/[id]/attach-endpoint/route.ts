@@ -8,6 +8,8 @@ import { isVmNotFoundError } from "../../../../../services/vms/errors";
 import { openAttachEndpoint, runVmWorkflow } from "../../../../../services/vms/workflows";
 
 export const dynamic = "force-dynamic";
+// Keep in sync with VM_ROUTE_MAX_DURATION_SECONDS; Next.js requires a literal here.
+export const maxDuration = 60;
 
 export async function POST(
   request: Request,

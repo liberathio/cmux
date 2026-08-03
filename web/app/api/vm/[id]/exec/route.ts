@@ -6,8 +6,14 @@ import {
 import { setSpanAttributes } from "../../../../../services/telemetry";
 import { isVmNotFoundError } from "../../../../../services/vms/errors";
 import { execVm, runVmWorkflow } from "../../../../../services/vms/workflows";
+import {
+  DEFAULT_EXEC_TIMEOUT_MS,
+  MAX_EXEC_TIMEOUT_MS,
+} from "../../../../../services/vms/config";
 
 export const dynamic = "force-dynamic";
+// Keep in sync with VM_ROUTE_MAX_DURATION_SECONDS; Next.js requires a literal here.
+export const maxDuration = 60;
 
 export async function POST(
   request: Request,
@@ -32,14 +38,14 @@ export async function POST(
       if (typeof body.command !== "string" || body.command.length === 0) {
         return jsonResponse({ error: "`command` is required and must be a non-empty string" }, 400);
       }
-      // Clamp the timeout so a client can't tie up provider quota on a runaway exec. Upper
-      // bound matches the provider defaults (15 min on Freestyle); negative / non-number
-      // values fall back to 30s.
-      const MAX_EXEC_TIMEOUT_MS = 15 * 60 * 1000;
+      // Clamp the timeout so a client can't tie up provider quota on a runaway exec. The upper
+      // bound is the function's own budget, not the provider's: Freestyle accepts 15 min, but
+      // this request is killed at `maxDuration`, so a longer timeout only buys the caller a 504
+      // with the command still running. Negative / non-number values fall back to the default.
       const rawTimeout = body.timeoutMs;
       const timeoutMs = typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0
         ? Math.min(Math.floor(rawTimeout), MAX_EXEC_TIMEOUT_MS)
-        : 30_000;
+        : DEFAULT_EXEC_TIMEOUT_MS;
 
       const { id } = await params;
       setSpanAttributes(span, {

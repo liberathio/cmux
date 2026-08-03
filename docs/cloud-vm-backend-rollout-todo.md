@@ -90,9 +90,13 @@ These are already configured in Vercel for development, preview, and production:
   - `OTEL_SERVICE_NAME`
   - `OTEL_EXPORTER_OTLP_ENDPOINT`
   - `OTEL_EXPORTER_OTLP_HEADERS`
-- [ ] Confirm Vercel function max duration for VM routes. `POST /api/vm` can wait on real provider
+- [x] Confirm Vercel function max duration for VM routes. `POST /api/vm` can wait on real provider
   provisioning, so the route either needs a sufficient `maxDuration` or must become an async
   create-status flow before production.
+  - All provider-waiting VM routes now declare `maxDuration = 60`, and the documented recovery for
+    a create that outlives it is polling `GET /api/vm/<idempotency-key>`.
+  - `exec` no longer advertises a 15 minute `timeoutMs`: it is clamped below the function budget,
+    since the platform kills the request first.
 - [ ] Confirm Stack Auth callback and trusted domains include:
   - `https://cmux.com`
   - the Vercel preview domain pattern used by this project
@@ -332,9 +336,13 @@ after the Vercel REST handshake. Rivet is only a temporary stateful control-plan
 
 ## Phase 8: CI/CD Guardrails
 
-- [ ] PR checks should run web typecheck and Bun tests.
-- [ ] PR checks should not call paid providers by default.
-- [ ] Provider tests should use a `MockVMProvider` by default.
+- [x] PR checks should run web typecheck and Bun tests. The `web-typecheck` job runs
+  `bun tsc --noEmit` and `bun test`; `web-db-migrations` runs the Postgres-backed suites,
+  now including `tests/vm-workflows.test.ts`.
+- [x] PR checks should not call paid providers by default. No CI job sets `E2B_API_KEY` or
+  `FREESTYLE_API_KEY`, and every workflow test injects a stub provider gateway.
+- [x] Provider tests should use a `MockVMProvider` by default. Tests provide their own
+  `VmProviderGatewayShape` through `Layer.succeed`, so no provider driver is constructed.
 - [ ] Staging smoke tests may call real E2B/Freestyle with tiny quotas.
 - [ ] Vercel preview checks should verify the project root is still `web`.
 - [ ] Add a CI check that required deployed env var names are documented in `web/.env.example` and

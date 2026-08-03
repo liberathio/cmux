@@ -58,6 +58,25 @@ The response reports the durable row, not a provider probe:
 Unlike `GET /api/vm`, destroyed rows are still readable here so a caller can tell "destroyed" apart
 from "never existed" — an unknown handle returns `404`.
 
+The supported create flow is therefore:
+
+1. `POST /api/vm` with an `Idempotency-Key` the client generated and persisted.
+2. On a `200`, use the returned `id`.
+3. On a timeout, a dropped connection, or a `409` (`vm create already in progress`), poll
+   `GET /api/vm/<the same idempotency key>` until `status` leaves `provisioning`.
+4. Retrying `POST` with the same key never creates a second provider VM.
+
+### Function duration budget
+
+Every VM route that waits on a provider declares `maxDuration = 60`, mirrored by
+`VM_ROUTE_MAX_DURATION_SECONDS` in `services/vms/config.ts`. Next.js only accepts a literal in the
+route file, so the constant documents the value rather than providing it.
+
+`POST /api/vm/:id/exec` clamps `timeoutMs` to `MAX_EXEC_TIMEOUT_MS` (5s under the budget). The
+provider itself would accept far longer execs, but this request is killed at `maxDuration`, so a
+longer timeout only converts a real exit code into a `504` while the command keeps running.
+Long-running commands belong on the PTY/attach path, not on `exec`.
+
 ## Authentication model
 
 Public callers only use `/api/vm/*`. Each route calls Stack Auth first and returns `401` before any Postgres or provider operation when the caller is unauthenticated.
