@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -52,6 +52,25 @@ export type VmRepositoryShape = {
     readonly userId: string;
     readonly handle: string;
   }) => Effect.Effect<CloudVmRow | null, VmDatabaseError>;
+  /**
+   * Creates whose serverless function died before the provider answered. Only rows without a
+   * `provider_vm_id` qualify: once that column is set the VM really exists and destroying it is
+   * a different operation. These rows keep counting towards the active VM limit, so leaving
+   * them behind locks the owning team out of creating anything.
+   */
+  readonly listAbandonedProvisioningVms: (input: {
+    readonly olderThan: Date;
+    readonly limit: number;
+  }) => Effect.Effect<CloudVmRow[], VmDatabaseError>;
+  /**
+   * Conditional transition used by the reaper. Returns `false` when the row no longer matches,
+   * which is how a create that finished between the scan and the write survives untouched.
+   */
+  readonly markCreateAbandoned: (input: {
+    readonly id: string;
+    readonly code: string;
+    readonly message: string;
+  }) => Effect.Effect<boolean, VmDatabaseError>;
   readonly markDestroyed: (id: string) => Effect.Effect<void, VmDatabaseError>;
   readonly recordLease: (input: {
     readonly vmId: string;
@@ -271,6 +290,45 @@ export const VmRepositoryLive = Layer.succeed(VmRepository, {
         .orderBy(desc(cloudVms.createdAt))
         .limit(1);
       return vm ?? null;
+    }),
+
+  listAbandonedProvisioningVms: (input) =>
+    dbEffect("listAbandonedProvisioningVms", async () => {
+      const db = cloudDb();
+      return await db
+        .select()
+        .from(cloudVms)
+        .where(
+          and(
+            eq(cloudVms.status, "provisioning"),
+            isNull(cloudVms.providerVmId),
+            lt(cloudVms.createdAt, input.olderThan),
+          ),
+        )
+        .orderBy(cloudVms.createdAt)
+        .limit(input.limit);
+    }),
+
+  markCreateAbandoned: (input) =>
+    dbEffect("markCreateAbandoned", async () => {
+      const db = cloudDb();
+      const rows = await db
+        .update(cloudVms)
+        .set({
+          status: "failed",
+          failureCode: input.code,
+          failureMessage: input.message,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(cloudVms.id, input.id),
+            eq(cloudVms.status, "provisioning"),
+            isNull(cloudVms.providerVmId),
+          ),
+        )
+        .returning({ id: cloudVms.id });
+      return rows.length > 0;
     }),
 
   markDestroyed: (id) =>

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { VmNotFoundError } from "../services/vms/errors";
+import { createVmWorkflowMocks } from "./support/vmWorkflowMocks";
 
 const getUser = mock(async () => null);
 const runVmWorkflow = mock(async () => {
@@ -13,18 +14,9 @@ mock.module("../app/lib/stack", () => ({
   isStackConfigured: () => true,
 }));
 
-// `mock.module` replaces the module for the whole test process, so every export the other
-// VM route tests import has to stay present here too.
-mock.module("../services/vms/workflows", () => ({
-  createVm: mock(() => ({ workflow: "create" })),
-  destroyVm,
-  execVm: mock(() => ({ workflow: "exec" })),
-  getUserVmStatus,
-  listUserVms: mock(() => ({ workflow: "list" })),
-  openAttachEndpoint: mock(() => ({ workflow: "attach" })),
-  openSshEndpoint: mock(() => ({ workflow: "ssh" })),
-  runVmWorkflow,
-}));
+mock.module("../services/vms/workflows", () =>
+  createVmWorkflowMocks({ destroyVm, getUserVmStatus, runVmWorkflow }),
+);
 
 const { GET } = await import("../app/api/vm/[id]/route");
 

@@ -321,7 +321,9 @@ after the Vercel REST handshake. Rivet is only a temporary stateful control-plan
 - [ ] Add a replacement for actor-owned cleanup:
   - expired lease cleanup
   - orphan provider VM cleanup
-  - stuck provisioning cleanup
+  - [x] stuck provisioning cleanup — hourly `/api/cron/vm-reaper` resolves `provisioning` rows
+    with no `provider_vm_id` older than 15 minutes to `failed`, releasing the active VM slot they
+    were holding. Requires `CRON_SECRET`; the route fails closed without it.
 - [x] No Rivet actor migration is needed for new Cloud VM state. If pre-merge actor state existed,
   treat those VMs as pre-production and clean them up provider-side.
 - [x] Remove Rivet env requirements after the DB-backed routes are live:

@@ -90,6 +90,60 @@ export function getUserVmStatus(input: {
   });
 }
 
+/**
+ * Resolves creates whose serverless function died before the provider answered.
+ *
+ * `beginCreate` counts `provisioning` rows towards the active VM limit, so an abandoned row
+ * silently locks its team out of creating any VM — the failure mode is "I cannot create a VM
+ * anymore", not "one VM looks odd". Only rows without a `provider_vm_id` are touched, and the
+ * transition is conditional, so a create that finished late is never overwritten.
+ *
+ * This does not talk to the provider. If the provider did finish after the function died, the
+ * VM survives provider-side and is reported by `vm.create.abandoned` usage events; reconciling
+ * those against provider inventory is separate work that costs provider API calls.
+ */
+export function reapStuckProvisioningVms(input: {
+  readonly staleAfterMs: number;
+  readonly now?: Date;
+  readonly limit?: number;
+}) {
+  return Effect.gen(function* () {
+    const repo = yield* VmRepository;
+    const now = input.now ?? new Date();
+    const olderThan = new Date(now.getTime() - input.staleAfterMs);
+    const candidates = yield* repo.listAbandonedProvisioningVms({
+      olderThan,
+      limit: input.limit ?? 100,
+    });
+
+    let reaped = 0;
+    for (const vm of candidates) {
+      const claimed = yield* repo.markCreateAbandoned({
+        id: vm.id,
+        code: "create_abandoned",
+        message: "provisioning never completed; the create request did not survive",
+      });
+      if (!claimed) continue;
+      reaped += 1;
+      yield* repo.recordUsageEvent({
+        userId: vm.userId,
+        billingTeamId: vm.billingTeamId,
+        billingPlanId: vm.billingPlanId,
+        vmId: vm.id,
+        eventType: "vm.create.abandoned",
+        provider: vm.provider,
+        imageId: vm.imageId,
+        metadata: {
+          createdAt: vm.createdAt.toISOString(),
+          staleAfterMs: input.staleAfterMs,
+        },
+      }).pipe(Effect.catchAll(() => Effect.void));
+    }
+
+    return { reaped, scanned: candidates.length };
+  });
+}
+
 export function createVm(input: {
   readonly userId: string;
   readonly billingCustomerType: BillingCustomerType;

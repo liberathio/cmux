@@ -138,6 +138,7 @@ jobs:
           bun test tests/drizzle-effect.test.ts
           bun test tests/vm-db-read-model.test.ts
           bun test tests/vm-workflows.test.ts
+          bun test tests/vm-reaper.test.ts
 
   tests:
     runs-on: warp-macos-15-arm64-6x

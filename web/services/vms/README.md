@@ -32,6 +32,10 @@ db/
 
 There is no raw actor or provider protocol endpoint. The old `/api/rivet/*` gateway has been removed.
 
+`/api/cron/vm-reaper` is not part of that surface. It is scheduled from `vercel.json`, authorized
+with `Bearer $CRON_SECRET`, and returns `503` when `CRON_SECRET` is unset so an unprotected deploy
+cannot expose it. See "Abandoned create reaper" below.
+
 ### Create status polling
 
 `GET /api/vm/:id` accepts a handle, not only a provider VM id. The handle is matched against
@@ -76,6 +80,24 @@ route file, so the constant documents the value rather than providing it.
 provider itself would accept far longer execs, but this request is killed at `maxDuration`, so a
 longer timeout only converts a real exit code into a `504` while the command keeps running.
 Long-running commands belong on the PTY/attach path, not on `exec`.
+
+### Abandoned create reaper
+
+A create whose function died before the provider answered leaves a `provisioning` row with no
+`provider_vm_id`. `beginCreate` counts `provisioning` towards the active VM limit, so that row
+keeps consuming a slot forever: the user's symptom is "I can no longer create a VM", not a stray
+row. `reapStuckProvisioningVms` resolves those rows to `failed` with `failure_code =
+"create_abandoned"` once they are older than 15 minutes, far above the 60s function budget.
+
+- Only rows without a `provider_vm_id` are eligible, and the update is conditional, so a create
+  that finished late is never overwritten.
+- Each reaped row emits a `vm.create.abandoned` usage event, so the cleanup is auditable and
+  repeated runs stay idempotent.
+- Required env: `CRON_SECRET` in every environment where the cron runs.
+
+The reaper deliberately does **not** call the provider. If the provider finished after the
+function died, the VM still exists provider-side; reconciling those against provider inventory
+costs provider API calls and is tracked separately as orphan cleanup.
 
 ## Authentication model
 

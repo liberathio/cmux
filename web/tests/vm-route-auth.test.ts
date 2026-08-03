@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { createVmWorkflowMocks } from "./support/vmWorkflowMocks";
 
 const getUser = mock(async () => null);
 const runVmWorkflow = mock(async () => {
@@ -34,16 +35,18 @@ mock.module("../app/lib/stack", () => ({
   isStackConfigured: () => true,
 }));
 
-mock.module("../services/vms/workflows", () => ({
-  createVm,
-  destroyVm,
-  execVm,
-  getUserVmStatus,
-  listUserVms,
-  openAttachEndpoint,
-  openSshEndpoint,
-  runVmWorkflow,
-}));
+mock.module("../services/vms/workflows", () =>
+  createVmWorkflowMocks({
+    createVm,
+    destroyVm,
+    execVm,
+    getUserVmStatus,
+    listUserVms,
+    openAttachEndpoint,
+    openSshEndpoint,
+    runVmWorkflow,
+  }),
+);
 
 const { GET, POST } = await import("../app/api/vm/route");
 const { DELETE } = await import("../app/api/vm/[id]/route");
