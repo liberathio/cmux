@@ -8,6 +8,7 @@ const createVm = mock(() => ({ workflow: "create" }));
 const listUserVms = mock(() => ({ workflow: "list" }));
 const destroyVm = mock(() => ({ workflow: "destroy" }));
 const execVm = mock(() => ({ workflow: "exec" }));
+const getUserVmStatus = mock(() => ({ workflow: "status" }));
 const openAttachEndpoint = mock(() => ({ workflow: "attach" }));
 const openSshEndpoint = mock(() => ({ workflow: "ssh" }));
 const VM_ENV_KEYS = [
@@ -37,6 +38,7 @@ mock.module("../services/vms/workflows", () => ({
   createVm,
   destroyVm,
   execVm,
+  getUserVmStatus,
   listUserVms,
   openAttachEndpoint,
   openSshEndpoint,
@@ -57,6 +59,7 @@ beforeEach(() => {
   createVm.mockClear();
   destroyVm.mockClear();
   execVm.mockClear();
+  getUserVmStatus.mockClear();
   listUserVms.mockClear();
   openAttachEndpoint.mockClear();
   openSshEndpoint.mockClear();

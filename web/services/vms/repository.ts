@@ -42,6 +42,16 @@ export type VmRepositoryShape = {
     readonly userId: string;
     readonly providerVmId: string;
   }) => Effect.Effect<CloudVmRow | null, VmDatabaseError>;
+  /**
+   * Read-only lookup for status polling. `handle` is either a provider VM id or the
+   * idempotency key the caller sent to `POST /api/vm`: a client whose create request timed
+   * out only knows the latter. Destroyed rows stay visible here so "what happened to my VM"
+   * has an answer; mutating paths keep using `findUserVm`, which excludes them.
+   */
+  readonly findUserVmByHandle: (input: {
+    readonly userId: string;
+    readonly handle: string;
+  }) => Effect.Effect<CloudVmRow | null, VmDatabaseError>;
   readonly markDestroyed: (id: string) => Effect.Effect<void, VmDatabaseError>;
   readonly recordLease: (input: {
     readonly vmId: string;
@@ -237,6 +247,28 @@ export const VmRepositoryLive = Layer.succeed(VmRepository, {
             ne(cloudVms.status, "destroyed"),
           ),
         )
+        .limit(1);
+      return vm ?? null;
+    }),
+
+  findUserVmByHandle: (input) =>
+    dbEffect("findUserVmByHandle", async () => {
+      const db = cloudDb();
+      const [vm] = await db
+        .select()
+        .from(cloudVms)
+        .where(
+          and(
+            eq(cloudVms.userId, input.userId),
+            or(
+              eq(cloudVms.providerVmId, input.handle),
+              eq(cloudVms.idempotencyKey, input.handle),
+            ),
+          ),
+        )
+        // A provider VM id is unique per provider and an idempotency key is unique per user,
+        // but the same string could in principle be both. Prefer the most recent row.
+        .orderBy(desc(cloudVms.createdAt))
         .limit(1);
       return vm ?? null;
     }),

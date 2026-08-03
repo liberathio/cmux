@@ -305,7 +305,10 @@ after the Vercel REST handshake. Rivet is only a temporary stateful control-plan
 - [ ] Decide whether provider create stays synchronous or becomes async:
   - synchronous is simpler but depends on Vercel function duration
   - async requires a queue or background worker but avoids long HTTP requests
-- [ ] Add `GET /api/vm/:id/status` or equivalent before moving long creates fully async.
+- [x] Add `GET /api/vm/:id/status` or equivalent before moving long creates fully async.
+  - Shipped as `GET /api/vm/:id`, where `:id` is a handle resolved against `provider_vm_id` and
+    then `idempotency_key`, so a client whose create request timed out can still read the
+    outcome. Returns `status`, a nullable `id`, and the recorded `failure`.
 - [x] Replace actor serialization with DB correctness:
   - unique constraints for idempotency
   - row locks or advisory locks around destroy/attach/snapshot

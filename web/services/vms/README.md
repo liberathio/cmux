@@ -25,12 +25,38 @@ db/
 ## HTTP surface
 
 - `/api/vm`, authenticated `GET` list and `POST` create.
-- `/api/vm/:id`, authenticated `DELETE` destroy.
+- `/api/vm/:id`, authenticated `GET` status and `DELETE` destroy.
 - `/api/vm/:id/exec`, authenticated `POST` command execution.
 - `/api/vm/:id/attach-endpoint`, authenticated `POST` PTY/RPC attach lease minting.
 - `/api/vm/:id/ssh-endpoint`, authenticated `POST` legacy Freestyle SSH attach.
 
 There is no raw actor or provider protocol endpoint. The old `/api/rivet/*` gateway has been removed.
+
+### Create status polling
+
+`GET /api/vm/:id` accepts a handle, not only a provider VM id. The handle is matched against
+`cloud_vms.provider_vm_id` first and against `cloud_vms.idempotency_key` second, because a client
+whose `POST /api/vm` exceeded the serverless function duration never received a provider VM id and
+can only identify its create by the `Idempotency-Key` it sent.
+
+The response reports the durable row, not a provider probe:
+
+```json
+{
+  "id": "provider-vm-1",
+  "status": "provisioning | running | failed | paused | destroyed",
+  "provider": "e2b",
+  "image": "cmuxd-ws:proxy-20260424a",
+  "imageVersion": "e2b-proxy-20260424a",
+  "idempotencyKey": "idem-1",
+  "createdAt": 1777000000000,
+  "failure": { "code": "create", "message": "provider unavailable" }
+}
+```
+
+`id` is `null` until the provider create finishes. `failure` is present only for `status: "failed"`.
+Unlike `GET /api/vm`, destroyed rows are still readable here so a caller can tell "destroyed" apart
+from "never existed" — an unknown handle returns `404`.
 
 ## Authentication model
 

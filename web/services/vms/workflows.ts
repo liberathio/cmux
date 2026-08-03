@@ -39,6 +39,21 @@ export type VmEntry = {
   readonly createdAt: number;
 };
 
+/**
+ * Lifecycle snapshot of a single VM. Unlike `VmEntry`, `providerVmId` is nullable because a
+ * create that is still provisioning (or that failed) never got one.
+ */
+export type VmStatusEntry = {
+  readonly providerVmId: string | null;
+  readonly status: CloudVmRow["status"];
+  readonly provider: ProviderId;
+  readonly image: string;
+  readonly imageVersion: string | null;
+  readonly idempotencyKey: string | null;
+  readonly createdAt: number;
+  readonly failure: { readonly code: string | null; readonly message: string | null } | null;
+};
+
 export const VmWorkflowLive = Layer.mergeAll(VmRepositoryLive, VmProviderGatewayLive, VmBillingGatewayLive);
 
 export function runVmWorkflow<A>(
@@ -52,6 +67,26 @@ export function listUserVms(userId: string) {
     const repo = yield* VmRepository;
     const rows = yield* repo.listUserVms(userId);
     return rows.filter((row) => row.providerVmId).map(vmEntryFromRow);
+  });
+}
+
+/**
+ * Status of one VM the caller owns, addressed either by provider VM id or by the idempotency
+ * key used to create it. This is the read path that makes a slow `POST /api/vm` recoverable:
+ * a client whose create request exceeded the serverless function duration can still find out
+ * whether the VM ended up provisioned, failed, or was never created.
+ */
+export function getUserVmStatus(input: {
+  readonly userId: string;
+  readonly handle: string;
+}) {
+  return Effect.gen(function* () {
+    const repo = yield* VmRepository;
+    const vm = yield* repo.findUserVmByHandle(input);
+    if (!vm) {
+      return yield* Effect.fail(new VmNotFoundError({ vmId: input.handle }));
+    }
+    return vmStatusFromRow(vm);
   });
 }
 
@@ -442,6 +477,21 @@ function vmEntryFromRow(row: CloudVmRow): VmEntry {
     image: row.imageId,
     imageVersion: row.imageVersion,
     createdAt: row.createdAt.getTime(),
+  };
+}
+
+function vmStatusFromRow(row: CloudVmRow): VmStatusEntry {
+  return {
+    providerVmId: row.providerVmId,
+    status: row.status,
+    provider: row.provider,
+    image: row.imageId,
+    imageVersion: row.imageVersion,
+    idempotencyKey: row.idempotencyKey,
+    createdAt: row.createdAt.getTime(),
+    failure: row.status === "failed"
+      ? { code: row.failureCode, message: row.failureMessage }
+      : null,
   };
 }
 
