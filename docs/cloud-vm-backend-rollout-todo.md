@@ -309,6 +309,10 @@ after the Vercel REST handshake. Rivet is only a temporary stateful control-plan
 - [ ] Decide whether provider create stays synchronous or becomes async:
   - synchronous is simpler but depends on Vercel function duration
   - async requires a queue or background worker but avoids long HTTP requests
+  - Current answer: stays synchronous. `VMClient.create` falls back to polling
+    `GET /api/vm/<idempotency-key>` when the request dies (unreachable backend, 409, 502, 504),
+    so a create that outlives the function is recovered by the client instead of needing a
+    queue. Revisit if provider provisioning routinely exceeds the poll deadline.
 - [x] Add `GET /api/vm/:id/status` or equivalent before moving long creates fully async.
   - Shipped as `GET /api/vm/:id`, where `:id` is a handle resolved against `provider_vm_id` and
     then `idempotency_key`, so a client whose create request timed out can still read the

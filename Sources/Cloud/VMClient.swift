@@ -5,11 +5,17 @@ enum VMClientError: Error, CustomStringConvertible {
     case backendUnreachable(url: String, detail: String)
     case httpStatus(Int, String)
     case malformedResponse(String)
+    case createFailed(String)
+    case createStillProvisioning
 
     var description: String {
         switch self {
         case .notSignedIn:
             return "Not signed in. Run `cmux auth login` first."
+        case .createFailed(let message):
+            return "VM create failed: \(message)"
+        case .createStillProvisioning:
+            return "VM is still provisioning. Run `cmux vm list` in a moment to pick it up."
         case .backendUnreachable(let url, let detail):
             return """
                 Cannot reach cmux backend at \(url). Is the dev server running?
@@ -30,6 +36,19 @@ struct VMSummary {
     let provider: String
     let image: String
     let createdAt: Int64
+}
+
+/// Lifecycle snapshot from `GET /api/vm/:handle`. `id` stays nil until the provider answers,
+/// so a create that is still in flight is reported without inventing an identifier.
+struct VMCreateStatus {
+    let id: String?
+    let status: String
+    let provider: String
+    let image: String
+    let createdAt: Int64
+    let failureMessage: String?
+
+    var isTerminal: Bool { status != "provisioning" }
 }
 
 struct VMExecResult {
@@ -85,6 +104,8 @@ actor VMClient {
     static let shared = VMClient()
     private static let createTimeoutSeconds: TimeInterval = 16 * 60
     private static let attachTimeoutSeconds: TimeInterval = 16 * 60
+    private static let createPollInitialDelaySeconds: TimeInterval = 2
+    private static let createPollMaxDelaySeconds: TimeInterval = 15
 
     private let session: URLSession
 
@@ -116,6 +137,86 @@ actor VMClient {
     }
 
     func create(image: String? = nil, provider: String? = nil, idempotencyKey: String) async throws -> VMSummary {
+        let deadline = Date().addingTimeInterval(Self.createTimeoutSeconds)
+        do {
+            return try await postCreate(image: image, provider: provider, idempotencyKey: idempotencyKey)
+        } catch let error as VMClientError {
+            // The create request can die without the create itself dying: the serverless
+            // function has its own duration budget, and a 409 means an earlier attempt with
+            // this key is still running. The idempotency key is a durable handle, so the
+            // outcome is still readable — poll for it instead of reporting a failure the
+            // user would have to reconcile by hand.
+            guard Self.createOutcomeIsStillPending(error) else { throw error }
+            return try await awaitCreate(idempotencyKey: idempotencyKey, deadline: deadline)
+        }
+    }
+
+    /// Status of one VM addressed by provider VM id or by the idempotency key used to create it.
+    func status(handle: String) async throws -> VMCreateStatus {
+        let encodedHandle = try pathSegment(handle, fieldName: "vm handle")
+        let (data, http) = try await request("GET", path: "/api/vm/\(encodedHandle)")
+        try ensureOK(http, data: data)
+        let obj = try decodeJSONObject(data)
+        guard let statusValue = obj["status"] as? String, !statusValue.isEmpty else {
+            throw VMClientError.malformedResponse("missing `status` on GET /api/vm/\(handle) response")
+        }
+        let failure = obj["failure"] as? [String: Any]
+        return VMCreateStatus(
+            id: (obj["id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            status: statusValue,
+            provider: obj["provider"] as? String ?? "",
+            image: obj["image"] as? String ?? "",
+            createdAt: (obj["createdAt"] as? Int64) ?? Int64((obj["createdAt"] as? Double) ?? 0),
+            failureMessage: failure?["message"] as? String
+        )
+    }
+
+    private static func createOutcomeIsStillPending(_ error: VMClientError) -> Bool {
+        switch error {
+        case .backendUnreachable:
+            return true
+        case .httpStatus(let code, _):
+            // 409: an earlier attempt with the same key is still provisioning.
+            // 504/502: the gateway gave up on the function, not on the provider.
+            return code == 409 || code == 502 || code == 504
+        default:
+            return false
+        }
+    }
+
+    private func awaitCreate(idempotencyKey: String, deadline: Date) async throws -> VMSummary {
+        var delay = Self.createPollInitialDelaySeconds
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            let snapshot: VMCreateStatus
+            do {
+                snapshot = try await status(handle: idempotencyKey)
+            } catch let error as VMClientError {
+                // A 404 here means the create never reached the database, so there is nothing
+                // to wait for. Anything else transient is worth another pass.
+                if case .httpStatus(404, _) = error { throw error }
+                delay = min(delay * 2, Self.createPollMaxDelaySeconds)
+                continue
+            }
+            if let id = snapshot.id, !id.isEmpty {
+                return VMSummary(
+                    id: id,
+                    provider: snapshot.provider,
+                    image: snapshot.image,
+                    createdAt: snapshot.createdAt > 0
+                        ? snapshot.createdAt
+                        : Int64(Date().timeIntervalSince1970 * 1000)
+                )
+            }
+            if snapshot.isTerminal {
+                throw VMClientError.createFailed(snapshot.failureMessage ?? snapshot.status)
+            }
+            delay = min(delay * 2, Self.createPollMaxDelaySeconds)
+        }
+        throw VMClientError.createStillProvisioning
+    }
+
+    private func postCreate(image: String?, provider: String?, idempotencyKey: String) async throws -> VMSummary {
         var body: [String: Any] = [:]
         if let image { body["image"] = image }
         if let provider { body["provider"] = provider }
